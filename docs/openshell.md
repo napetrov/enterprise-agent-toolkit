@@ -288,6 +288,89 @@ endpoints (see the [OpenShell policy reference](https://github.com/NVIDIA/OpenSh
 
 ---
 
+## Run OpenCode (coding agent) in a sandbox
+
+[OpenCode](https://opencode.ai) is preinstalled in the community sandbox image. It runs entirely
+inside the sandbox and reaches the model only through the `genai-gateway` provider — so the
+LiteLLM key never enters the sandbox, and every other outbound connection stays denied. This
+reuses the same sandbox setup as above; you only add a small OpenCode config, then start its TUI.
+
+Pick a `MODEL` your GenAI Gateway serves that supports tool calling (from the `/models` list above).
+
+### 1. Create the sandbox and add a minimal OpenCode config
+
+```bash
+MODEL=us.anthropic.claude-opus-4-7   # a tool-calling model your gateway serves
+
+# Deny-all network policy: the sandbox's ONLY egress is the genai-gateway provider endpoint.
+# Without it, the community image's default policy lets python/pip reach PyPI. Filesystem and
+# landlock are applied at startup, so this MUST be passed to `sandbox create` (it cannot be
+# changed later with `policy set`).
+cat > /tmp/opencode-policy.yaml <<'YAML'
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+network_policies: {}
+YAML
+
+openshell sandbox create --name opencode --provider genai-gateway --policy /tmp/opencode-policy.yaml --detach \
+  --env OPENAI_BASE_URL=http://genai-gateway-service.genai-gateway.svc.cluster.local:4000/v1
+
+# OpenCode talks to the GenAI Gateway using the sandbox's injected env (placeholder key).
+openshell sandbox exec -n opencode --no-tty -- sh -c 'mkdir -p ~/.config/opencode && cat > ~/.config/opencode/opencode.json' <<JSON
+{ "\$schema": "https://opencode.ai/config.json",
+  "model": "gw/$MODEL",
+  "provider": { "gw": { "npm": "@ai-sdk/openai-compatible",
+    "options": { "baseURL": "{env:OPENAI_BASE_URL}", "apiKey": "{env:OPENAI_API_KEY}" },
+    "models": { "$MODEL": { "tool_call": true } } } },
+  "autoupdate": false, "share": "disabled", "formatter": false, "tools": { "webfetch": false } }
+JSON
+```
+
+### 2. Open the OpenCode TUI and try two prompts
+
+```bash
+openshell sandbox exec -n opencode --tty -- bash -lc \
+  'export OPENCODE_DISABLE_DEFAULT_PLUGINS=1 OPENCODE_DISABLE_MODELS_FETCH=1 \
+     OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_SHARE=1
+   cd /sandbox && exec opencode'
+```
+
+In the TUI, enter these one at a time:
+
+1. **Works:** `Write Python that prints the first 10 Fibonacci numbers, save it as fib.py and run it.`
+   OpenCode writes the file and runs it; the model call goes out through the GenAI Gateway.
+2. **Blocked by the sandbox:** `Install the pandas package with pip and create a small report.`
+   `pip install` fails with `403 Forbidden` from the proxy — the deny-all policy allows only the
+   gateway, so PyPI is unreachable. OpenCode reports the failure. (`pandas` is not in the
+   community image; if you use another package, pick one that isn't preinstalled, or `pip` needs
+   no download and succeeds.)
+
+OpenCode also tries to reach `registry.npmjs.org` at startup; `openshell logs opencode` shows that
+connection as `DENIED`. It is harmless.
+
+Quit with `ctrl+c`, then clean up:
+
+```bash
+openshell sandbox delete opencode
+```
+
+> The model must do reliable tool calling (a Claude model works well). Small local models on this
+> stack often emit tool calls as plain text, and OpenCode ends the turn without acting.
+
+> In the community image, `opencode` is a Node launcher that starts the bundled executable
+> `/usr/lib/node_modules/opencode-ai/bin/.opencode`, which makes the model calls. That path is
+> allowlisted in the `genai-gateway` provider profile
+> (`core/helm-charts/openshell/genai-gateway-provider.yaml`). If a
+> model call returns `binary ... not allowed in policy '_provider_genai_gateway'`, add OpenCode's
+> resolved binary path there and re-run the deployment (or `openshell provider profile update`).
+
+---
+
 ## End-to-End Example: Restricted Agent
 
 **Scenario:** an LLM agent that runs arbitrary shell commands chosen by the model. It may read
