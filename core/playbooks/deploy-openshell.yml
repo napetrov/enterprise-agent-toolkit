@@ -271,11 +271,12 @@
             set -o pipefail
             for k in ca.crt tls.crt tls.key; do
               kubectl get secret {{ openshell_client_tls_secret }} -n {{ openshell_namespace }} \
-                -o jsonpath="{.data.${k//./\\.}}" | base64 -d > {{ openshell_cli_path }}/config/openshell/gateways/eat/mtls/$k
+                -o jsonpath="{.data.${k//./\\.}}" | base64 -d > "$k"
             done
-            chmod 600 {{ openshell_cli_path }}/config/openshell/gateways/eat/mtls/*
+            chmod 600 ca.crt tls.crt tls.key
           args:
             executable: /bin/bash
+            chdir: "{{ openshell_cli_path }}/config/openshell/gateways/eat/mtls"
           changed_when: false
           no_log: true
 
@@ -297,7 +298,6 @@
         - name: Register profile and provider through a temporary port-forward
           shell: |
             set -eo pipefail
-            cd {{ openshell_cli_path }}
             kubectl port-forward -n {{ openshell_namespace }} svc/{{ openshell_release_name }} 0:8080 > pf.log 2>&1 &
             PF=$!
             trap 'kill $PF 2>/dev/null' EXIT
@@ -337,6 +337,7 @@
             fi
           args:
             executable: /bin/bash
+            chdir: "{{ openshell_cli_path }}"
           environment: "{{ openshell_cli_env }}"
           register: provider_reg
           changed_when: "'provider exists' not in provider_reg.stdout"

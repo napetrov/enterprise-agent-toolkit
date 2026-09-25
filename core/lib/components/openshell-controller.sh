@@ -33,11 +33,22 @@ openshell_deploy_fingerprint() {
     } | sha256sum | cut -d' ' -f1
 }
 
+# openshell_setting <core_dir> <key>
+#
+# Top-level scalar from inference_openshell.yml (e.g. openshell_namespace), for the
+# shell-side checks and messages that must follow the configured names.
+openshell_setting() {
+    sed -nE "s/^$2: *\"?([^\"#[:space:]]*)\"?.*/\1/p" \
+        "$1/inventory/metadata/vars/inference_openshell.yml" | head -1
+}
+
 deploy_openshell_controller() {
     local chart_version="${openshell_chart_version:-0.0.116}"
     local image_tag="${openshell_image_tag:-0.0.116}"
     local release_tag="${openshell_release_tag:-v0.0.116}"
-    local fingerprint
+    local ns release fingerprint
+    ns="$(openshell_setting "${SCRIPT_DIR}" openshell_namespace)"
+    release="$(openshell_setting "${SCRIPT_DIR}" openshell_release_name)"
     fingerprint="$(openshell_deploy_fingerprint "${SCRIPT_DIR}" "${chart_version}" "${image_tag}" "${release_tag}")"
 
     echo ""
@@ -61,16 +72,16 @@ deploy_openshell_controller() {
         echo "${GREEN}  OpenShell deployed successfully!${NC}"
         echo ""
         echo "${CYAN}  Quick-start (admin, from the control plane):${NC}"
-        echo "    kubectl port-forward -n openshell-system svc/openshell 8080:8080 &"
-        echo "    # client mTLS bundle: secret openshell-client-tls in openshell-system"
+        echo "    kubectl port-forward -n ${ns} svc/${release} 8080:8080 &"
+        echo "    # client mTLS bundle: secret openshell-client-tls in ${ns}"
         echo "    openshell gateway add https://127.0.0.1:8080 --local --name eat"
         echo "    openshell sandbox create --name demo --provider genai-gateway \\"
         echo "      --env OPENAI_BASE_URL=http://genai-gateway-service.genai-gateway.svc.cluster.local:4000/v1"
         echo ""
     else
         echo "${RED}  OpenShell deployment failed! Check Ansible output above.${NC}"
-        echo "    kubectl get pods -n openshell-system"
-        echo "    kubectl logs -n openshell-system statefulset/openshell"
+        echo "    kubectl get pods -n ${ns}"
+        echo "    kubectl logs -n ${ns} statefulset/${release}"
         echo ""
         exit 1
     fi

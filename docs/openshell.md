@@ -146,9 +146,9 @@ deploy_openshell=on
 
 `deploy_openshell=on` requires `deploy_agent_sandbox=on` in the same run, or Agent Sandbox
 CRDs already present on the cluster; otherwise the deployment exits before installing
-anything. On re-runs, resume mode skips OpenShell only if the `openshell` release in
-`openshell-system` is `deployed` and the last run completed with the current version pins and
-settings (see [Deployment](#deployment)).
+anything. On re-runs, resume mode skips OpenShell only if the `openshell_release_name` release
+in `openshell_namespace` (as set in `inference_openshell.yml`) is `deployed` and the last run
+completed with the current version pins and settings (see [Deployment](#deployment)).
 
 ### Version pins in `core/inventory/metadata/agentic-metadata.cfg`
 
@@ -491,7 +491,8 @@ openshell logs <sandbox> --source sandbox
 | `deploy_openshell=on requires deploy_agent_sandbox=on` | Enable Agent Sandbox in the same run |
 | `OpenShell on Kubernetes authenticates users via OIDC only` | Choose an auth mode in `inference_openshell.yml` |
 | LLM call returns `policy_denied` | The calling binary is not in the provider profile `binaries` list (`core/helm-charts/openshell/genai-gateway-provider.yaml`); edit it and re-run `./deploy-agentic-stack.sh` with `deploy_openshell=on` |
-| CLI hangs or `transport error` | Port-forward dropped; restart it and make sure `NO_PROXY` includes `127.0.0.1` |
+| `transport error` / `Connection reset by peer`, or `--upload` fails with `ssh tar extract exited with status 255` | `kubectl port-forward` dropped a stream; retry the command (re-run `openshell sandbox upload <name> <file> <dest>` for a failed upload), and restart the port-forward if it exited |
+| CLI hangs | Make sure `NO_PROXY` includes `127.0.0.1`, so the CLI does not send gateway traffic through a proxy |
 
 ---
 

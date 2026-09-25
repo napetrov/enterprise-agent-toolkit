@@ -767,17 +767,19 @@ _auto_skip_deployed_components() {
 
     # OpenShell (policy-enforced sandboxes on Agent Sandbox) — skip only a completed run of
     # the current pins and settings; the playbook is idempotent, so anything else re-applies.
-    local _openshell_pins _openshell_fp
+    local _openshell_pins _openshell_fp _openshell_ns _openshell_rel
     _openshell_pins="$(source "${CORE_DIR}/inventory/metadata/agentic-metadata.cfg" 2>/dev/null \
         && echo "${openshell_chart_version} ${openshell_image_tag} ${openshell_release_tag}")"
     # shellcheck disable=SC2086  # pins are three space-separated words
     _openshell_fp="$(openshell_deploy_fingerprint "${CORE_DIR}" ${_openshell_pins})"
-    if helm status openshell -n openshell-system 2>/dev/null | grep -q '^STATUS: deployed$' && \
-       [[ "$(kubectl get configmap openshell-deploy-state -n openshell-system \
+    _openshell_ns="$(openshell_setting "${CORE_DIR}" openshell_namespace)"
+    _openshell_rel="$(openshell_setting "${CORE_DIR}" openshell_release_name)"
+    if helm status "${_openshell_rel}" -n "${_openshell_ns}" 2>/dev/null | grep -q '^STATUS: deployed$' && \
+       [[ "$(kubectl get configmap openshell-deploy-state -n "${_openshell_ns}" \
              -o jsonpath='{.data.fingerprint}' 2>/dev/null)" == "${_openshell_fp}" ]]; then
         _cfg_turn_off "deploy_openshell"
         success "OpenShell: already deployed — skipping"
-    elif helm status openshell -n openshell-system &>/dev/null; then
+    elif helm status "${_openshell_rel}" -n "${_openshell_ns}" &>/dev/null; then
         info "OpenShell: incomplete deployment or changed settings — will re-apply"
     fi
 
@@ -847,12 +849,16 @@ print_summary() {
     # Detect optional components that may or may not be deployed
     local _sandbox_status="not deployed"
     local _openshell_status="not deployed"
+    local _openshell_ns _openshell_rel _openshell_sbx_ns
+    _openshell_ns="$(openshell_setting "${CORE_DIR}" openshell_namespace)"
+    _openshell_rel="$(openshell_setting "${CORE_DIR}" openshell_release_name)"
+    _openshell_sbx_ns="$(openshell_setting "${CORE_DIR}" openshell_sandbox_namespace)"
     local _pgvector_status="not deployed"
     local _kuberay_status="not deployed"
     local _kuberay_ns="ray-system"
     if command -v kubectl &>/dev/null && kubectl get nodes &>/dev/null 2>&1; then
         kubectl get namespace agent-sandbox  &>/dev/null 2>&1 && _sandbox_status="deployed"
-        helm status openshell -n openshell-system &>/dev/null 2>&1 && _openshell_status="deployed"
+        helm status "${_openshell_rel}" -n "${_openshell_ns}" &>/dev/null 2>&1 && _openshell_status="deployed"
         kubectl get namespace pgvector       &>/dev/null 2>&1 && _pgvector_status="deployed"
         # Detect kuberay namespace from kuberay-config.yaml if present
         local _krc="${CORE_DIR}/inventory/kuberay-config.yaml"
@@ -979,8 +985,8 @@ except Exception:
     echo ""
     echo -e "${YELLOW}── OPENSHELL (${_openshell_status}) ───────────────────────────────────────────${NC}"
     if [[ "${_openshell_status}" == "deployed" ]]; then
-        echo -e "  Gateway (in-cluster): https://openshell.openshell-system.svc.cluster.local:8080 (mTLS)"
-        echo -e "  Sandboxes namespace : openshell-sandboxes"
+        echo -e "  Gateway (in-cluster): https://${_openshell_rel}.${_openshell_ns}.svc.cluster.local:8080 (mTLS)"
+        echo -e "  Sandboxes namespace : ${_openshell_sbx_ns}"
         echo -e "  GenAI provider      : genai-gateway (LiteLLM virtual key, placeholder in sandbox)"
     else
         echo -e "  Not deployed — enable with: deploy_openshell=on in agentic-config.cfg"

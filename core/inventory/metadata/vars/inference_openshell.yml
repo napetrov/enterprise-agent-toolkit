@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # NVIDIA OpenShell configuration (policy-enforced sandboxes on top of Agent Sandbox)
+# The two namespaces and the release name are also read by deploy-agentic-stack.sh (resume
+# check, summary), so change them here rather than through extra vars.
 openshell_namespace: "openshell-system"             # gateway (holds provider credentials)
 openshell_sandbox_namespace: "openshell-sandboxes"  # sandbox workload + supervisor pods
 openshell_release_name: "openshell"
