@@ -32,22 +32,93 @@ OpenShell is **optional** and **off by default** (`deploy_openshell=off`).
 
 ## Architecture
 
+Two different components are called "gateway" in this document:
+
+- **OpenShell gateway** — the OpenShell control plane. It creates and deletes sandboxes and
+  stores policies and provider credentials. It does not proxy LLM traffic.
+- **GenAI Gateway (LiteLLM)** — the toolkit's existing model proxy (`deploy_genai_gateway=on`).
+  OpenShell does not deploy its own; sandboxes reach models only through this one.
+
+An **agent** is any program you run inside a sandbox (a custom Python agent, a coding
+assistant, a framework app). OpenShell does not ship an agent. The **supervisor** is the
+OpenShell process that runs in the same pod as the agent and enforces its policy.
+
+Deployment installs the platform once; each agent run then gets its own sandbox, created on
+demand with `openshell sandbox create` (or the gateway API) and removed with `sandbox delete`.
+
 ```
-Admin / CI (control plane)
-        │  openshell CLI over kubectl port-forward (mTLS client cert)
-        ▼
-openshell.openshell-system.svc.cluster.local:8080   (OpenShell gateway, StatefulSet)
-        │  creates Sandbox CRs
-        ▼
-agent-sandbox-controller  (from deploy_agent_sandbox)
-        │  spawns sandbox pod
-        ▼
-default--<name>  (pod in openshell-sandboxes)
-  supervisor: egress policy, L7 rules, Landlock, credential injection
-        │  Authorization: Bearer <placeholder>  →  real LiteLLM virtual key
-        ▼
-genai-gateway-service.genai-gateway.svc.cluster.local:4000  (LiteLLM)
+Admin / CI / orchestrator
+   │  openshell CLI or API over kubectl port-forward (mTLS client cert)
+   ▼
+OpenShell gateway  (StatefulSet openshell-0, openshell-system)
+   │ 1. creates Sandbox CR              ▲ 3. supervisor fetches policy and
+   ▼                                    │    provider credentials (mTLS)
+Agent Sandbox controller ── 2. creates pod ──┐
+(deploy_agent_sandbox)                       ▼
+┌─ sandbox pod default--<name> (openshell-sandboxes) ─────────┐
+│  agent process (your code)  ──►  OpenShell supervisor       │
+│                                  egress / L7 policy, Landlock│
+│                                  placeholder → real key      │
+└──────────────────────────────────────┬──────────────────────┘
+                                       │ 4. allowed traffic only
+          ┌────────────────────────────┴──────────────────┐
+          ▼                                               ▼
+GenAI Gateway (LiteLLM, :4000)                   hosts allowed by the sandbox
+  virtual key → model backends                   policy (via the corporate proxy)
 ```
+
+---
+
+## How OpenShell Connects to the Toolkit
+
+### Reused toolkit components
+
+| Toolkit component | Used by OpenShell for | Changed |
+|---|---|---|
+| Kubernetes cluster (`ei-infra-eligible` node label) | Runs the gateway and sandbox pods; the gateway is placed on infra nodes | No |
+| Agent Sandbox controller `v0.5.0` (`deploy_agent_sandbox`) | Turns OpenShell `Sandbox` CRs into pods | No |
+| GenAI Gateway / LiteLLM (`deploy_genai_gateway`) | The only path from a sandbox to models | One additional virtual key |
+| Model backends behind LiteLLM | Reached through LiteLLM only | No |
+| Deployment framework (`agentic-config.cfg`, metadata pins, `fresh-install.sh`, Ansible, resume mode) | Installs and re-runs OpenShell like other components | New `deploy_openshell` switch |
+| Proxy settings (`https_proxy`, `no_proxy`) | Sandbox egress is chained through the corporate proxy | No |
+| CNI (e.g. Calico) | Enforces the sandbox NetworkPolicy | No |
+
+Not used by OpenShell: the Agent Sandbox router, `SandboxTemplate`, `WarmPool` and the
+`k8s-agent-sandbox` SDK. OpenShell creates `Sandbox` CRs directly, so both ways of running
+sandboxes coexist on the same controller. Fluent Bit does not collect OpenShell policy events
+on 0.0.116 (see [Known Limitations](#known-limitations-00116)).
+
+### Added by OpenShell
+
+| Component | Kind | Role |
+|---|---|---|
+| OpenShell gateway | StatefulSet + Service `openshell:8080` (mTLS) | Sandbox lifecycle API, policy and credential store |
+| Supervisor | Process in every sandbox pod | Egress and L7 enforcement, Landlock, seccomp, credential injection |
+| `openshell` CLI | Binary on the admin host | Administration; used by the playbook to register the provider |
+| Provider `genai-gateway` (profile `eat-genai-gateway`) | Gateway record | LiteLLM host and port, bearer credential, allowed binaries |
+| NetworkPolicy `eat-openshell-sandbox-pods` | Added by the toolkit | Pod-level network limits under the supervisor |
+
+### Interfaces
+
+| # | From | To | Interface | Configured by |
+|---|---|---|---|---|
+| 1 | Admin / CI | OpenShell gateway | gRPC over mTLS through `kubectl port-forward` (secret `openshell-client-tls`) | Chart; see [Verification](#verification) |
+| 2 | OpenShell gateway | Kubernetes API | Creates `agents.x-k8s.io/v1beta1` `Sandbox` CRs in `openshell-sandboxes` | Chart RBAC |
+| 3 | Agent Sandbox controller | Kubernetes API | Reconciles the CR into a pod | Toolkit, unchanged |
+| 4 | Supervisor | OpenShell gateway | gRPC over mTLS: policy, credentials, events | Playbook copies the client TLS secret into the sandbox namespace |
+| 5 | Agent | Supervisor | All pod egress passes through the supervisor | OpenShell |
+| 6 | Supervisor | LiteLLM `:4000` | OpenAI-compatible HTTP; `Authorization: Bearer <placeholder>` rewritten to the virtual key | Provider profile; `providers_v2_enabled=true` (playbook) |
+| 7 | Playbook | LiteLLM admin API | `kubectl exec` into the LiteLLM pod, `POST /key/generate` with the in-pod master key → Secret `openshell-genai-key` → provider credential | Playbook |
+| 8 | LiteLLM | Model backends | Unchanged; the key's allowed models and budget apply | Toolkit, unchanged |
+| 9 | Supervisor | External hosts | Only hosts in the sandbox policy, through the corporate proxy | `--policy` per sandbox; proxy from `agentic-config.cfg` |
+
+### Where credentials live
+
+| Credential | Location | Visible inside a sandbox |
+|---|---|---|
+| LiteLLM master key | LiteLLM pod only | No |
+| Virtual key `openshell-sandboxes` | Secret `openshell-genai-key` and the OpenShell gateway | No — only a placeholder |
+| Client certificate (`openshell-client-tls`) | `openshell-system` and `openshell-sandboxes` | Mounted for the supervisor; grants gateway admin, so restrict `pods/exec` |
 
 ---
 
@@ -205,6 +276,160 @@ openshell sandbox delete demo
 Without `--from`, sandboxes use the OpenShell community base image. Pass
 `--from <image>` for your own agent image, and `--policy <file>` to allow additional
 endpoints (see the [OpenShell policy reference](https://github.com/NVIDIA/OpenShell/blob/v0.0.116/docs/reference/policy-schema.mdx)).
+
+---
+
+## End-to-End Example: Restricted Agent
+
+**Scenario:** an LLM agent that runs arbitrary shell commands chosen by the model. It may read
+from the GitHub API and call models through the GenAI Gateway, and nothing else: it cannot
+write to GitHub, cannot send data to other hosts, and never sees the LiteLLM key.
+
+The example uses the default community image and a standard-library-only Python agent, so no
+image build is needed. Run it on the control plane after
+[connecting the CLI](#connect-the-cli-admin-control-plane).
+
+### 1. Write the sandbox policy
+
+`github-readonly.yaml` allows `curl` to reach `api.github.com` with read-only methods. The
+GenAI Gateway endpoint is added by the `genai-gateway` provider, so it is not listed here.
+
+```yaml
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/bin, /usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+  read_write: [/tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+network_policies:
+  github_api:
+    name: github-api-readonly
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/curl
+```
+
+### 2. Write the agent
+
+`agent.py` gives the model one tool, `run_shell`, and loops until the model answers without
+a tool call:
+
+```python
+"""Minimal tool-calling agent: the LLM gets one tool that runs shell commands in the sandbox."""
+import json, os, re, subprocess, sys, urllib.request
+
+MODEL = os.environ["MODEL"]  # a model id from GET /v1/models
+# Tool output goes into the next LLM request, and OpenShell 0.0.116 rejects requests whose
+# body contains a credential placeholder, so redact it.
+PLACEHOLDER = re.compile(r"openshell:resolve:env:[A-Za-z0-9_]+")
+TOOLS = [{"type": "function", "function": {
+    "name": "run_shell", "description": "Run a bash command and return its output.",
+    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}}]
+
+
+def chat(messages):
+    req = urllib.request.Request(
+        os.environ["OPENAI_BASE_URL"] + "/chat/completions",
+        json.dumps({"model": MODEL, "messages": messages, "tools": TOOLS}).encode(),
+        {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=120))["choices"][0]["message"]
+
+
+def run_shell(cmd):
+    p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=30)
+    return PLACEHOLDER.sub("[credential]", f"exit={p.returncode}\n{p.stdout}{p.stderr}")[-2000:]
+
+
+messages = [{"role": "system", "content": "You are an agent in a Linux sandbox. Use run_shell (curl is "
+             "available). Run each step once. If a step fails, report the error and move on; do not try workarounds."},
+            {"role": "user", "content": sys.argv[1]}]
+for _ in range(10):
+    msg = chat(messages)
+    messages.append({k: v for k, v in msg.items() if v is not None})
+    if not msg.get("tool_calls"):
+        print("[final]", msg.get("content"))
+        break
+    for call in msg["tool_calls"]:
+        cmd = json.loads(call["function"]["arguments"])["cmd"]
+        out = run_shell(cmd)
+        print(f"$ {cmd}\n{out[:300]}\n")
+        messages.append({"role": "tool", "tool_call_id": call["id"], "content": out})
+```
+
+### 3. Create the sandbox
+
+```bash
+openshell sandbox create --name agent-demo --provider genai-gateway \
+  --policy github-readonly.yaml --upload agent.py:/sandbox/agent.py --detach \
+  --env OPENAI_BASE_URL=http://genai-gateway-service.genai-gateway.svc.cluster.local:4000/v1 \
+  --env MODEL=<model-id>
+
+openshell sandbox get agent-demo
+# Phase: Ready
+```
+
+Use a model id returned by `GET /v1/models` (see
+[Run a sandbox that calls the GenAI Gateway](#run-a-sandbox-that-calls-the-genai-gateway)).
+
+### 4. Run the agent
+
+```bash
+openshell sandbox exec -n agent-demo --no-tty -- python3 /sandbox/agent.py \
+  '1) Get the tag name of the latest NVIDIA/OpenShell release from https://api.github.com/repos/NVIDIA/OpenShell/releases/latest.
+   2) POST the tag name to https://httpbin.org/post.
+   3) Create a gist: curl -s -o /dev/null -w "%{http_code}" -X POST https://api.github.com/gists -d "{}".
+   Then summarize which steps worked.'
+```
+
+Output (abridged; the model chooses the exact commands):
+
+```
+$ curl -s https://api.github.com/repos/NVIDIA/OpenShell/releases/latest | grep -o '"tag_name": "[^"]*"' | cut -d'"' -f4
+exit=0
+v0.0.116
+
+$ curl -s -X POST https://httpbin.org/post -H "Content-Type: application/json" -d "{\"tag_name\": \"v0.0.116\"}"
+exit=56
+
+$ curl -s -o /dev/null -w "%{http_code}" -X POST https://api.github.com/gists -d "{}"
+exit=0
+403
+
+[final] Step 1: completed ... Step 2: failed due to network/access restrictions ... Step 3: returned 403 ...
+```
+
+| Agent action | Result | Enforced by |
+|---|---|---|
+| Chat completions to the GenAI Gateway | Allowed; spend recorded on the `openshell-sandboxes` key | Provider, credential injection |
+| `GET api.github.com/repos/...` | Allowed | `github_api` policy, `read-only` access |
+| `POST httpbin.org/post` | Blocked (`curl` exit 56) | Egress default-deny |
+| `POST api.github.com/gists` | Blocked (HTTP 403) | L7 rule: `POST` not permitted by `read-only` |
+| `echo $OPENAI_API_KEY` | Placeholder only | Credential isolation |
+
+### 5. Check the policy decisions
+
+The model may guess why a step failed (for example, it may attribute the 403 to missing GitHub
+authentication). The sandbox log records the actual decision:
+
+```bash
+openshell logs agent-demo --source sandbox | grep DENIED
+# ... NET:OPEN [MED] DENIED /usr/bin/curl(426) -> httpbin.org:443 [policy:- engine:opa]
+#     [reason:endpoint httpbin.org:443 is not allowed by any policy]
+# ... HTTP:POST [MED] DENIED POST http://api.github.com:443/gists [policy:github_api engine:l7]
+#     [reason:L7_REQUEST deny POST api.github.com:443/gists reason=POST /gists not permitted by policy]
+```
+
+### 6. Clean up
+
+```bash
+openshell sandbox delete agent-demo
+```
 
 ---
 
