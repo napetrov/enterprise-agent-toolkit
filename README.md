@@ -111,7 +111,7 @@ Enables agents to safely execute code and run arbitrary actions in isolated envi
 
 **Default provider:** `kubernetes-sigs/agent-sandbox`
 
-**Optional provider:** [NVIDIA OpenShell](docs/openshell.md) — policy-enforced sandboxes on top of Agent Sandbox (egress default-deny, L7 rules, Landlock, credential isolation with GenAI Gateway keys). Enable with `deploy_openshell=on`.
+**Optional policy layer:** [NVIDIA OpenShell](docs/openshell.md) — policy-enforced sandboxes on top of Agent Sandbox (egress default-deny, L7 rules, Landlock where the kernel supports it, GenAI Gateway key kept out of the sandbox). Off by default; enable with `deploy_openshell=on`.
 
 ---
 

@@ -5,7 +5,7 @@
 Sandbox CRs, and a supervisor inside every sandbox enforces:
 
 - **Egress default-deny** with per-host / per-binary allow rules and L7 (HTTP method/path) policy
-- **Filesystem restrictions** (Landlock) and seccomp
+- **Filesystem restrictions** (Landlock, best effort: applied where the node kernel supports it) and seccomp
 - **Credential isolation** — the sandbox only sees a placeholder; the supervisor injects the
   real credential into requests toward the allowed endpoint
 
@@ -557,6 +557,40 @@ not selected, so the chart's stricter policies stay in effect.
   `openshell_release_name` to a different value.
 - **NetworkPolicy enforcement depends on the CNI.** Some CNIs (for example kindnet) do not block
   traffic from a pod to its own node, such as the API server on a single-node cluster.
+
+---
+
+## Removal
+
+The toolkit has no per-component uninstall. To remove OpenShell from a running cluster, set
+`deploy_openshell=off` in `agentic-config.cfg` (so a later run does not reinstall it), then run
+these steps on the control plane. They use the default names; if you changed them in
+`inference_openshell.yml`, use yours.
+
+```bash
+# 1. Delete the sandboxes (with the CLI connected, see Verification)
+openshell sandbox list
+openshell sandbox delete <name>
+
+# 2. Uninstall the gateway, then delete both namespaces. helm uninstall keeps the gateway
+#    database PVC and the credential-encryption key Secret; deleting the namespaces removes
+#    them, together with the Secrets and the NetworkPolicy the playbook created.
+helm uninstall openshell -n openshell-system --wait
+kubectl delete namespace openshell-sandboxes openshell-system
+
+# 3. Revoke the LiteLLM virtual key (runs in the LiteLLM pod, which holds the master key)
+kubectl exec -n genai-gateway deploy/genai-gateway-deployment -c litellm-container -- python -c '
+import os, urllib.request
+req = urllib.request.Request("http://127.0.0.1:4000/key/delete",
+    b"{\"key_aliases\": [\"openshell-sandboxes\"]}",
+    {"Authorization": "Bearer " + os.environ["LITELLM_MASTER_KEY"], "Content-Type": "application/json"})
+print(urllib.request.urlopen(req).read().decode())'
+
+# 4. Admin host: `gateway remove` keeps the client certificate files, so delete them too,
+#    and the CLI the playbook downloaded
+openshell gateway remove eat
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/eat" ~/.cache/eat/openshell-cli-v0.0.116
+```
 
 ---
 

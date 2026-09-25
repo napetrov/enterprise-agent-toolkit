@@ -507,10 +507,12 @@ For the full guide — adding custom templates, WarmPools, and SDK usage — see
 
 ## Step 2d — OpenShell (Policy-Enforced Sandboxes)
 
-NVIDIA OpenShell runs on top of Agent Sandbox and enforces egress default-deny, L7 rules,
-Landlock and credential isolation inside every sandbox. The GenAI Gateway is registered as a
-provider: sandboxes see a placeholder key and the supervisor injects a dedicated LiteLLM
-virtual key.
+NVIDIA OpenShell is an optional policy layer on top of Agent Sandbox (off by default). A
+supervisor in each sandbox applies that sandbox's policy: egress is denied unless the policy
+allows it (optionally per HTTP method and path), and filesystem access is restricted with
+Landlock where the node kernel supports it. The GenAI Gateway is registered as a provider:
+sandboxes see a placeholder key and the supervisor injects a dedicated LiteLLM virtual key.
+Validated with OpenShell `0.0.116` in single-admin mode.
 
 ```ini
 # core/inventory/agentic-config.cfg
