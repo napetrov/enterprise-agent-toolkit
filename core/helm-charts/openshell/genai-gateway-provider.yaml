@@ -31,5 +31,5 @@ binaries:
   - /usr/local/bin/python3
   - /usr/local/bin/python3.12
   - /sandbox/.uv/python/**
-  # OpenCode in the community image: a Node launcher starts this bundled executable.
+  # OpenCode (community image): its Node launcher execs this binary.
   - /usr/lib/node_modules/opencode-ai/bin/.opencode
