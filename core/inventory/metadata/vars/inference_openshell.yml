@@ -10,7 +10,13 @@ helm_charts_base_openshell: "{{ lookup('env', 'PWD') }}/helm-charts/openshell"
 
 # CLI used from the control plane to register the GenAI Gateway provider
 openshell_cli_url: "https://github.com/NVIDIA/OpenShell/releases/download/{{ openshell_release_tag }}/openshell-x86_64-unknown-linux-musl.tar.gz"
-openshell_cli_dir: "/tmp/openshell-cli"
+# Empty = ~/.cache/eat/openshell-cli-<release tag> of the deploying user (mode 0700): private,
+# and versioned so a release bump fetches a matching CLI.
+openshell_cli_dir: ""
+
+# Set by openshell-controller.sh; stored in ConfigMap openshell-deploy-state after a
+# successful run so resume mode can tell a complete deployment from a partial one.
+openshell_deploy_fingerprint: ""
 
 # User authentication. OpenShell on Kubernetes authenticates users via OIDC only
 # (mTLS covers transport + supervisors). Set openshell_oidc_issuer (e.g. Keycloak realm URL),

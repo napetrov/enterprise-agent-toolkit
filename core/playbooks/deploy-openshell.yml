@@ -17,7 +17,7 @@
     openshell_client_tls_secret: "openshell-client-tls"
     # CLI talks to 127.0.0.1 via port-forward; never route that through a corporate proxy.
     openshell_cli_env:
-      XDG_CONFIG_HOME: "{{ openshell_cli_dir }}/config"
+      XDG_CONFIG_HOME: "{{ openshell_cli_path }}/config"
       NO_PROXY: "127.0.0.1,localhost"
       no_proxy: "127.0.0.1,localhost"
       OPENSHELL_GATEWAY: "eat"
@@ -236,27 +236,44 @@
           no_log: true
           when: vk_secret.rc != 0
 
+        # Resolved on the host: XDG_CONFIG_HOME below cannot take a literal "~".
+        - name: Resolve home directory of the deploying user
+          command: printenv HOME
+          register: cli_home
+          changed_when: false
+          when: openshell_cli_dir | length == 0
+
+        - name: Set CLI directory
+          ansible.builtin.set_fact:
+            openshell_cli_path: >-
+              {{ openshell_cli_dir if openshell_cli_dir | length > 0
+                 else cli_home.stdout ~ '/.cache/eat/openshell-cli-' ~ openshell_release_tag }}
+
+        # Private before anything is extracted or run from it; fails if another user owns it.
         - name: Prepare CLI directories
           ansible.builtin.file:
-            path: "{{ openshell_cli_dir }}/config/openshell/gateways/eat/mtls"
+            path: "{{ item }}"
             state: directory
             mode: "0700"
+          loop:
+            - "{{ openshell_cli_path }}"
+            - "{{ openshell_cli_path }}/config/openshell/gateways/eat/mtls"
 
         - name: Fetch OpenShell CLI
           ansible.builtin.unarchive:
             src: "{{ openshell_cli_url }}"
-            dest: "{{ openshell_cli_dir }}"
+            dest: "{{ openshell_cli_path }}"
             remote_src: true
-            creates: "{{ openshell_cli_dir }}/openshell"
+            creates: "{{ openshell_cli_path }}/openshell"
 
         - name: Write CLI mTLS bundle from the chart secret
           shell: |
             set -o pipefail
             for k in ca.crt tls.crt tls.key; do
               kubectl get secret {{ openshell_client_tls_secret }} -n {{ openshell_namespace }} \
-                -o jsonpath="{.data.${k//./\\.}}" | base64 -d > {{ openshell_cli_dir }}/config/openshell/gateways/eat/mtls/$k
+                -o jsonpath="{.data.${k//./\\.}}" | base64 -d > {{ openshell_cli_path }}/config/openshell/gateways/eat/mtls/$k
             done
-            chmod 600 {{ openshell_cli_dir }}/config/openshell/gateways/eat/mtls/*
+            chmod 600 {{ openshell_cli_path }}/config/openshell/gateways/eat/mtls/*
           args:
             executable: /bin/bash
           changed_when: false
@@ -265,12 +282,12 @@
         - name: Render provider profile
           ansible.builtin.copy:
             src: "{{ helm_charts_base_openshell }}/genai-gateway-provider.yaml"
-            dest: "{{ openshell_cli_dir }}/genai-gateway-provider.yaml"
+            dest: "{{ openshell_cli_path }}/genai-gateway-provider.yaml"
             mode: "0644"
 
         - name: Set GenAI Gateway endpoint in provider profile
           ansible.builtin.replace:
-            path: "{{ openshell_cli_dir }}/genai-gateway-provider.yaml"
+            path: "{{ openshell_cli_path }}/genai-gateway-provider.yaml"
             regexp: "{{ item.key }}"
             replace: "{{ item.value }}"
           loop:
@@ -280,7 +297,7 @@
         - name: Register profile and provider through a temporary port-forward
           shell: |
             set -eo pipefail
-            cd {{ openshell_cli_dir }}
+            cd {{ openshell_cli_path }}
             kubectl port-forward -n {{ openshell_namespace }} svc/{{ openshell_release_name }} 0:8080 > pf.log 2>&1 &
             PF=$!
             trap 'kill $PF 2>/dev/null' EXIT
@@ -327,12 +344,30 @@
       always:
         - name: Remove CLI credentials
           ansible.builtin.file:
-            path: "{{ openshell_cli_dir }}/config"
+            path: "{{ openshell_cli_path }}/config"
             state: absent
+          when: openshell_cli_path is defined
 
     # ========================================================================
-    # Task Group 4: Summary
+    # Task Group 4: Record completion and summary
     # ========================================================================
+    # Written last, so resume mode (deploy-agentic-stack.sh) re-runs a partial deployment.
+    - name: Record deployment fingerprint
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: openshell-deploy-state
+            namespace: "{{ openshell_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: agentic-ai-stack
+          data:
+            fingerprint: "{{ openshell_deploy_fingerprint }}"
+      when: openshell_deploy_fingerprint | length > 0
+      run_once: true
+
     - name: Deployment summary
       debug:
         msg:

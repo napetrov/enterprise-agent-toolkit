@@ -15,10 +15,30 @@
 # openshell_release_tag). Settings: inventory/metadata/vars/inference_openshell.yml.
 # ---------------------------------------------------------------------------
 
+# openshell_deploy_fingerprint <core_dir> <chart_version> <image_tag> <release_tag>
+#
+# Hash of what deploy_openshell_controller applies: the version pins plus the
+# OpenShell settings, Helm values, provider profile and playbook. The playbook
+# stores it in ConfigMap openshell-deploy-state after a successful run; the
+# resume check skips OpenShell only while it still matches, so failed runs,
+# version bumps and profile edits are re-applied on the next deployment.
+openshell_deploy_fingerprint() {
+    local core_dir="$1"
+    {
+        echo "$2 $3 $4"
+        cat "${core_dir}/inventory/metadata/vars/inference_openshell.yml" \
+            "${core_dir}/helm-charts/openshell/values.yaml" \
+            "${core_dir}/helm-charts/openshell/genai-gateway-provider.yaml" \
+            "${core_dir}/playbooks/deploy-openshell.yml"
+    } | sha256sum | cut -d' ' -f1
+}
+
 deploy_openshell_controller() {
     local chart_version="${openshell_chart_version:-0.0.116}"
     local image_tag="${openshell_image_tag:-0.0.116}"
     local release_tag="${openshell_release_tag:-v0.0.116}"
+    local fingerprint
+    fingerprint="$(openshell_deploy_fingerprint "${SCRIPT_DIR}" "${chart_version}" "${image_tag}" "${release_tag}")"
 
     echo ""
     echo "${BLUE}============================================================${NC}"
@@ -31,6 +51,7 @@ deploy_openshell_controller() {
         -e "openshell_chart_version=${chart_version}" \
         -e "openshell_image_tag=${image_tag}" \
         -e "openshell_release_tag=${release_tag}" \
+        -e "openshell_deploy_fingerprint=${fingerprint}" \
         ${openshell_extra_vars:+-e "${openshell_extra_vars}"}
 
     local exit_code=$?

@@ -765,10 +765,20 @@ _auto_skip_deployed_components() {
         success "Agent Sandbox: already deployed — skipping"
     fi
 
-    # OpenShell (policy-enforced sandboxes on Agent Sandbox)
-    if helm status openshell -n openshell-system &>/dev/null 2>&1; then
+    # OpenShell (policy-enforced sandboxes on Agent Sandbox) — skip only a completed run of
+    # the current pins and settings; the playbook is idempotent, so anything else re-applies.
+    local _openshell_pins _openshell_fp
+    _openshell_pins="$(source "${CORE_DIR}/inventory/metadata/agentic-metadata.cfg" 2>/dev/null \
+        && echo "${openshell_chart_version} ${openshell_image_tag} ${openshell_release_tag}")"
+    # shellcheck disable=SC2086  # pins are three space-separated words
+    _openshell_fp="$(openshell_deploy_fingerprint "${CORE_DIR}" ${_openshell_pins})"
+    if helm status openshell -n openshell-system 2>/dev/null | grep -q '^STATUS: deployed$' && \
+       [[ "$(kubectl get configmap openshell-deploy-state -n openshell-system \
+             -o jsonpath='{.data.fingerprint}' 2>/dev/null)" == "${_openshell_fp}" ]]; then
         _cfg_turn_off "deploy_openshell"
         success "OpenShell: already deployed — skipping"
+    elif helm status openshell -n openshell-system &>/dev/null; then
+        info "OpenShell: incomplete deployment or changed settings — will re-apply"
     fi
 
     info "Resume check complete — only pending components will be installed"

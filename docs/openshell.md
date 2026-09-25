@@ -146,8 +146,9 @@ deploy_openshell=on
 
 `deploy_openshell=on` requires `deploy_agent_sandbox=on` in the same run, or Agent Sandbox
 CRDs already present on the cluster; otherwise the deployment exits before installing
-anything. On re-runs, an existing `openshell` Helm release in `openshell-system` skips the
-component (resume mode).
+anything. On re-runs, resume mode skips OpenShell only if the `openshell` release in
+`openshell-system` is `deployed` and the last run completed with the current version pins and
+settings (see [Deployment](#deployment)).
 
 ### Version pins in `core/inventory/metadata/agentic-metadata.cfg`
 
@@ -170,6 +171,7 @@ openshell_release_tag="v0.0.116"
 | `openshell_genai_key_alias` | `openshell-sandboxes` | LiteLLM virtual key alias (spend tracking) |
 | `openshell_genai_key_models` | `[]` | Models the key may use (empty = all) |
 | `openshell_genai_key_max_budget` | `50` | LiteLLM budget for the key |
+| `openshell_cli_dir` | `""` | Where the playbook keeps the CLI; empty = `~/.cache/eat/openshell-cli-<release tag>` (mode `0700`) |
 | `openshell_sandbox_network_policy` | `true` | Apply `eat-openshell-sandbox-pods` |
 | `openshell_upstream_proxy_cidrs` | RFC 1918 ranges | Where the corporate proxy may live (proxy port only) |
 | `openshell_sandbox_egress_cidrs` | `[]` | Extra private CIDRs that sandbox policies may target |
@@ -214,6 +216,13 @@ The Ansible playbook (`core/playbooks/deploy-openshell.yml`) runs 4 task groups:
 
 Re-running is safe: the virtual key is minted once, the provider profile is updated in place
 (running sandboxes pick up changes), and an existing provider is kept.
+
+The last task stores a fingerprint of the version pins, `inference_openshell.yml`,
+`core/helm-charts/openshell/` and the playbook in ConfigMap `openshell-deploy-state`. On the
+next `./deploy-agentic-stack.sh`, resume mode skips OpenShell only while that fingerprint
+matches. To apply a changed pin, setting or provider profile, edit the file and re-run
+`./deploy-agentic-stack.sh` with `deploy_openshell=on`; a failed or interrupted run is retried
+the same way.
 
 ---
 
@@ -481,7 +490,7 @@ openshell logs <sandbox> --source sandbox
 |---|---|
 | `deploy_openshell=on requires deploy_agent_sandbox=on` | Enable Agent Sandbox in the same run |
 | `OpenShell on Kubernetes authenticates users via OIDC only` | Choose an auth mode in `inference_openshell.yml` |
-| LLM call returns `policy_denied` | The calling binary is not in the provider profile `binaries` list (`core/helm-charts/openshell/genai-gateway-provider.yaml`); re-run the deployment after editing |
+| LLM call returns `policy_denied` | The calling binary is not in the provider profile `binaries` list (`core/helm-charts/openshell/genai-gateway-provider.yaml`); edit it and re-run `./deploy-agentic-stack.sh` with `deploy_openshell=on` |
 | CLI hangs or `transport error` | Port-forward dropped; restart it and make sure `NO_PROXY` includes `127.0.0.1` |
 
 ---
